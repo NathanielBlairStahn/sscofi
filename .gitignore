@@ -107,5 +107,4 @@ venv.bak/
 .DS_Store
 
 # Private files
-initial_data/
-actual_data.ipynb
+actual_data/

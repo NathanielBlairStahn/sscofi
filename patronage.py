@@ -15,10 +15,11 @@ def get_contributions_df(members_df, membership_df, preferred_df, other_equity_d
     other_equity_df = other_equity_df.assign(type='other')
 
     equity_dfs = [membership_df, preferred_df, other_equity_df]
+    #Doing an inner join ignores superfluous columns in the input dataframes
     contributions_df = pd.concat(equity_dfs, join='inner', ignore_index=True)
 
     contributions_df = members_df.merge(contributions_df, on='name')
-    #contributions_df.rename(columns={'id': 'member_id'}, inplace=True)
+    #contributions_df.rename(columns={'id': 'member_#'}, inplace=True)
 
     return contributions_df
 
@@ -72,24 +73,42 @@ def fraction_year_remaining(date, use_year_end=True):
 def new_patronage_by_transaction(new_contributions_df):
     """Compute patronage for each transaction based on amount and fraction of year remaining.
     """
-    patronage = new_contributions_df['amount']*new_contributions_df['date'].apply(fraction_year_remaining)
-    return new_contributions_df.assign(patronage=patronage) #This makes a copy and adds a new column
+    year_fraction = new_contributions_df['date'].apply(fraction_year_remaining)
+    patronage = new_contributions_df['amount']*year_fraction
+    #This makes a copy and adds new columns
+    return new_contributions_df.assign(
+        year_fraction=year_fraction, patronage=patronage)
+
+def transaction_patronage_for_year(contributions_df, year):
+    """Compute patronage for each transaction in the given year.
+    """
+    current = split_by_year(contributions_df, year)[1]
+    year_fraction = current['date'].apply(fraction_year_remaining)
+    patronage = current['amount']*year_fraction
+    #This makes a copy and adds new columns
+    patronage_df = current.assign(
+        year_fraction=year_fraction, patronage=patronage)
+    totals = patronage_df[['member_#','patronage']].groupby(by='member_#',as_index=False).sum()
+    #print(totals)
+    #totals.reset_index(inplace=True)
+    totals.rename(columns={'patronage': 'member_total'}, inplace=True)
+    return patronage_df.merge(totals, on='member_#')
 
 def new_patronage_by_member(new_contributions_df):
     """Compute each member's patronage from new contributions for the current year.
     """
     new_contributions_df = new_patronage_by_transaction(new_contributions_df)
-    return new_contributions_df[['member_id','patronage']].groupby(by='member_id').sum()
+    return new_contributions_df[['member_#','patronage']].groupby(by='member_#').sum()
 
 def compute_patronage(old_equity_df, new_contributions_df):
     """Compute total patronage for each member from new contributions for the current year
         and existing equity from previous years.
     """
-    patronage_df = old_equity_df.set_index('member_id')[['name', 'equity']]
+    patronage_df = old_equity_df.set_index('member_#')[['name', 'equity']]
     patronage_df.rename(columns={'equity': 'old_patronage'}, inplace=True)
 
 #     new_contributions_df = new_patronage_by_transaction(new_contributions_df)
-#     new_contributions_df[['member_id','patronage']].groupby(by='member_id').sum()
+#     new_contributions_df[['member_#','patronage']].groupby(by='member_#').sum()
 
     patronage_df['new_patronage'] = new_patronage_by_member(new_contributions_df)['patronage']
     # If there were members with no contributions this year, set their new patronage to 0 (would be NaN).
@@ -102,7 +121,7 @@ def compute_patronage(old_equity_df, new_contributions_df):
 
 def compute_patronage_for_year(members_df, contributions_df, year):
     """Computes each member's patronage for the specified year."""
-    old_equity_df, new_contributions_df, _ = split_by_year(contributions_df, year)
+    old_equity_df, new_contributions_df = split_by_year(contributions_df, year)[:2]
     old_equity_df = get_equity_df(members_df, old_equity_df)
     return compute_patronage(old_equity_df, new_contributions_df)
 
@@ -111,24 +130,50 @@ def compute_dividends(patronage_df, profit, proportion_individual=0.5, rounded=T
     """
     dividend_df = patronage_df[['name', 'proportionate_patronage']].copy()
 
+    dividend_df['proportion_of_profit'] = dividend_df['proportionate_patronage'] * proportion_individual
+
     #Compute individual patronage allocations
-    dividend_df['dividend'] = dividend_df['proportionate_patronage'] * profit * proportion_individual
+    dividend_df['dividend'] = dividend_df['proportion_of_profit'] * profit
     if rounded:
         dividend_df['dividend'] = np.round(dividend_df['dividend'], 2)
 
     # To account for rounding amounts to the nearest cent, we add up the individual dividends
     # to get the actual amount allocated to individual net income. Then we subtract this amount
     # from the total profit to get the collective net income.
-    indiv_profit = dividend_df['dividend'].sum()
-    collective_profit = profit - indiv_profit
+    indiv_profit = dividend_df['dividend'].round(2).sum().round(2)
+    collective_profit = np.round(profit - indiv_profit,2)
 
-    # We reserve member_id=0 for the collective account (or we could simply use names as keys)
+    # We reserve member_#=0 for the collective account (or we could simply use names as keys)
     dividend_df.loc[0] = pd.Series({
-        'name': 'CollectiveAcct',
+        'name': 'Collective Acct.',
         'proportionate_patronage': collective_profit / indiv_profit,
+        'proportion_of_profit': collective_profit / profit,
         'dividend': collective_profit
     })
+    dividend_df.loc[-1] = pd.Series({
+        'name': 'Individual Accts.',
+        'proportionate_patronage': 1.0,
+        'proportion_of_profit': indiv_profit / profit,
+        'dividend': indiv_profit
+    })
+    dividend_df.loc[-2] = pd.Series({
+        'name': 'Total Profit',
+        'proportionate_patronage': profit / indiv_profit,
+        'proportion_of_profit': 1.0,
+        'dividend': profit
+    })
+
+
+
     return dividend_df
+
+def dividend_calculations(patronage_df, dividend_df):
+    """Merges the patronage and dividend dataframes to return a dataframe
+    with all the patronage and dividend calculations for the year.
+    """
+    return patronage_df.reset_index().merge(
+        dividend_df.reset_index(),on=None, how='outer'
+        ).set_index('member_#')
 
 def compute_allocations(dividend_df,
                         year,
@@ -206,3 +251,56 @@ def compute_allocations(dividend_df,
     allocation_df.rename(columns={'dividend': str(year)+'_dividend'}, inplace=True)
 
     return allocation_df
+
+def get_years_due(allocation_df):
+    """Takes a yearly allocation dataframe and returns the years in which
+    allocations issued that year are due.
+    """
+    return sorted(int(s) for s in allocation_df.columns if s.isdigit())
+
+def unpivot_allocations(allocation_df):
+    """Return a dataframe listing the allocations in allocation_df, in "unpivoted" form.
+    In this version, years are stored as integers.
+    """
+    years_due = get_years_due(allocation_df)
+    year_issued = years_due[0]-1
+
+    dividend_col = str(year_issued) + '_dividend'
+
+    allocations_by_year_due_dfs = (
+            [(allocation_df.loc[allocation_df[dividend_col] > 0, ['name', str(y)]]
+            .rename(columns={str(y): 'amount'})
+            .assign(year_issued=year_issued, year_due=y, year_paid=np.NaN))
+           for y in years_due]
+           )
+
+    #Vertically concatenate the dataframes for different years due
+    return pd.concat(allocations_by_year_due_dfs).reset_index()
+
+def unpivot_allocations_with_melt(allocation_df):
+    """Return a dataframe listing the allocations in allocation_df, in "unpivoted" form.
+    In this version, years are stored as strings."""
+    years_due = get_years_due(allocation_df)
+    year_issued = years_due[0]-1
+
+    years_due_cols = [str(y) for y in years_due]
+    dividend_col = str(year_issued) + '_dividend'
+
+    #Move member_# from index to a column
+    allocation_df = allocation_df.reset_index()
+
+    unpivoted_df = allocation_df.loc[allocation_df[dividend_col] > 0,:].melt(
+    id_vars = ['member_#','name'], value_vars = years_due_cols, var_name = 'year_due', value_name='amount')
+
+    unpivoted_df['year_issued'] = str(year_issued)
+    unpivoted_df['year_paid'] = np.NaN
+
+    #Reorder the columns on return
+    return unpivoted_df[['member_#','name','amount','year_issued','year_due','year_paid']]
+
+def list_all_allocations(allocation_dfs):
+    """Takes a list of yearly allocation dataframes, unpivots them, and
+    concatenates them into one long list of allocations.
+    """
+    return pd.concat([unpivot_allocations(df) for df in allocation_dfs],
+        ignore_index=True).rename_axis('notice_#', axis='index', inplace=True)

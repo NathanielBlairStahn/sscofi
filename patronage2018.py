@@ -23,107 +23,208 @@ def get_contributions_df(members_df, membership_df, preferred_df, other_equity_d
 
     return contributions_df
 
-def split_by_year(contributions_df, current_year, return_future=True):
-    """Splits a list of transactions into 3 lists:
-    one for the current year, one for past years, and one for future years.
+def split_by_year(contributions_df, year_to_split_on, return_future=False):
+    """Splits a list of transactions those occurring before, during,
+    and (optionally) after the given year.
     """
     year = pd.to_datetime(contributions_df['date']).apply(lambda date: date.year)
-    past = contributions_df[year < current_year]
-    current = contributions_df[year == current_year]
+    before = contributions_df[year < year_to_split_on]
+    during = contributions_df[year == year_to_split_on]
     if return_future:
-        future = contributions_df[year > current_year]
-        return past, current, future
+        return before, during, contributions_df[year > year_to_split_on]
     else:
-        return past, current
-
-def get_equity_df(members_df, contributions_df):
-    """Gets a dataframe displaying each member's different types of equity, based on the sum
-    of the amounts in the given list of contributions.
-    """
-    if len(contributions_df) == 0:
-        equity_df = members_df.assign(membership=0,preferred=0,other=0,equity=0)
-    else:
-        equity_df = contributions_df.pivot_table(
-            index=['name'], columns=['type'], values='amount', aggfunc=np.sum, fill_value=0)
-        equity_df = members_df.merge(equity_df, left_on='name', right_index=True, how='outer')
-        equity_df.fillna(0, inplace=True)
-
-        equity_types = ['membership', 'preferred', 'other']
-        for equity_type in equity_types:
-            if equity_type not in equity_df:
-                equity_df[equity_type] = 0
-
-        equity_df['equity'] = equity_df[equity_types].sum(axis=1)
-
-    return equity_df
+        return before, during
 
 def fraction_year_remaining(date, use_year_end=True):
     """Computes the fraction of the year remaining from a given date.
     """
     date = pd.to_datetime(date)
     if use_year_end:
+        #Use December 31 as cutoff
         offset = pd.tseries.offsets.YearEnd()
     else:
+        #Use January 1 as cutoff
         offset = pd.tseries.offsets.YearBegin()
     year = date - offset
     next_year = date + offset
     #print(offset, year, next_year)
     return ((next_year - date).days) / (next_year - year).days
 
-def new_patronage_by_transaction(new_contributions_df):
-    """Compute patronage for each transaction based on amount and fraction of year remaining.
-    """
-    year_fraction = new_contributions_df['date'].apply(fraction_year_remaining)
-    patronage = new_contributions_df['amount']*year_fraction
-    #This makes a copy and adds new columns
-    return new_contributions_df.assign(
-        year_fraction=year_fraction, patronage=patronage)
+def prepend_year(year, col_names):
+    """Prepend a year to a string or list of strings."""
+    if type(col_names) == str:
+        new_names = str(year) + "_" + col_names
+    else:
+        #Input should be a list (or iterable) of strings if not a single string.
+        new_names = [str(year) + "_" + col_name for col_name in col_names]
+    return new_names
 
-def transaction_patronage_for_year(contributions_df, year):
-    """Compute patronage for each transaction in the given year.
+def get_year_from_names(names):
+    """Tests whether a name or list of names share a common 4-digit number (e.g. year) prepended to them.
+    If so, returns the year as in int, otherwise (no year or years don't match) returns None.
     """
-    current = split_by_year(contributions_df, year)[1]
-    year_fraction = current['date'].apply(fraction_year_remaining)
-    patronage = current['amount']*year_fraction
+    #If a single name was passed, put it in a list.
+    if type(names) is str: names = [names]
+
+    #Get pairs of consecutive elements of the list.
+    consecutive_pairs = zip(names[:len(names)-1], names[1:])
+
+    #Check whether the first 4 digits of the names in each pair match.
+    #If so, all names share a common prefix.
+    if all(name1[:4] == name2[:4] for name1, name2 in consecutive_pairs):
+        #Check if the matching prefix is a digit, and if so return it.
+        if names[0][:4].isdigit():
+            return int(names[0][:4])
+
+    #If there was a mismatch or the prefix wasn't an integer, return None.
+    return None
+
+def is_match(name, col_name):
+    """Checks whether col_name either equals name or equals name prepended by a 4-digit number
+    plus one character (e.g. year plus a space or underscore).
+    """
+    return (col_name[-len(name):] == name) and (
+        len(col_name) == len(name) or (col_name[:4].isdigit() and len(col_name) == len(name)+5)
+    )
+
+def find_matching_names(names, columns):
+    """Finds the actual column names in columns that either match the names
+     exactly or have the year prepended.
+
+    Examples:
+    In: find_matching_names(names=['yak', 'snack'],
+            columns=['grundle', 'yak', 'smurf', 'glork', '3401 snack', 'glurg'])
+    Out: ['yak', '3401 snack']
+
+    In: find_matching_names(names=['yak', 'snack'],
+            columns=['grundle', 'snack', 'yak', 'smurf', 'glork', '3401 snack', 'glurg'])
+    Out: ['yak', 'snack', '3401 snack']
+
+    In: find_matching_names(names='snack',
+        columns=['grundle', 'snack', 'yak', 'smurf', 'glork', '3401 snack', 'glurg'])
+    Out: ['snack', '3401 snack']
+    """
+
+    #If a single string was passed, replace it with a list
+    if type(names) == str: names = [names]
+    if type(columns) == str: columns = [columns]
+
+    return [col for name in names for col in columns if is_match(name, col)]
+
+
+
+def old_patronage(old_contributions_df):
+    """Compute the "old patronage" given all the transactions before a given year.
+    """
+    columns_to_keep = [c for c in old_contributions_df.columns if c in ['member_#', 'name']]
+    patronage_types = ['membership', 'preferred', 'other']
+    old_patronage_column = 'old_patronage'
+
+    if len(old_contributions_df) == 0:
+        #An empty DataFrame needs to be handled separately to avoid an error when calling df.pivot_table.
+        old_patronage_df = pd.DataFrame(columns=columns_to_keep + patronage_types + [old_patronage_column])
+    else:
+        #Pivot the old_contributions dataframe, using the different types of patronage as the new columns,
+        #with 'member_#' and/or 'name' as the index.
+        old_patronage_df = old_contributions_df.pivot_table(
+            index=columns_to_keep, columns=['type'], values='amount', aggfunc=np.sum, fill_value=0)
+
+        #Move 'member_#' and/or 'name' into columns rather than keeping them as the index.
+        old_patronage_df.reset_index(inplace=True)
+        #Remove the name 'type' from the columns axis.
+        old_patronage_df.rename_axis(None, axis='columns', inplace=True)
+
+        #If some of the types of patronage didn't occur, explicitly add 0 patronage for that type.
+        for patronage_type in patronage_types:
+            if patronage_type not in old_patronage_df:
+                old_patronage_df[patronage_type] = 0
+
+    #reorder the columns in the desired order, and compute the total old patronage
+    #by adding up the different types and storing the value in a new column.
+    old_patronage_df[old_patronage_column] = old_patronage_df[patronage_types].sum(axis=1)
+
+    return old_patronage_df
+
+def new_patronage(new_contributions_df):
+    """Compute the "new patronage" given all the transactions that occurred during a given year."""
+    year_fraction = new_contributions_df['date'].apply(fraction_year_remaining)
+    new_patronage = new_contributions_df['amount']*year_fraction
     #This makes a copy and adds new columns
-    patronage_df = current.assign(
-        year_fraction=year_fraction, patronage=patronage)
-    totals = patronage_df[['member_#','patronage']].groupby(by='member_#',as_index=False).sum()
+    new_patronage_df = new_contributions_df.assign(
+        year_fraction=year_fraction, new_patronage=new_patronage)
+
+    totals = new_patronage_df[['member_#','new_patronage']].groupby(by='member_#', as_index=False).sum()
     #print(totals)
     #totals.reset_index(inplace=True)
-    totals.rename(columns={'patronage': 'member_total'}, inplace=True)
-    return patronage_df.merge(totals, on='member_#')
+    totals.rename(columns={'new_patronage': 'member_total'}, inplace=True)
+    return new_patronage_df.merge(totals, on='member_#')
 
-def new_patronage_by_member(new_contributions_df):
-    """Compute each member's patronage from new contributions for the current year.
+def old_new_patronage_for_year(contributions_df, year):
+    """Return both the old and new patronage for a given year.
+    The 'old_patronage' and 'new_patronage' columns will be prepended by the year.
     """
-    new_contributions_df = new_patronage_by_transaction(new_contributions_df)
-    return new_contributions_df[['member_#','patronage']].groupby(by='member_#').sum()
+    old_contributions_df, new_contributions_df = split_by_year(contributions_df, year)[:2]
+    old_patronage_df = old_patronage(old_contributions_df)
+    new_patronage_df = new_patronage(new_contributions_df)
 
-def compute_patronage(old_equity_df, new_contributions_df):
-    """Compute total patronage for each member from new contributions for the current year
-        and existing equity from previous years.
+    #Now rename columns with year
+    old_patronage_col, new_patronage_col = prepend_year(year, ['old_patronage', 'new_patronage'])
+    old_patronage_df.rename(columns={'old_patronage': old_patronage_col}, inplace=True)
+    new_patronage_df.rename(columns={'new_patronage': new_patronage_col}, inplace=True)
+
+    return old_patronage_df, new_patronage_df
+
+def total_patronage_for_members(members_df, old_patronage_df, new_patronage_df):
+    """Computes the total patronage for the specified members given lists of old patronage and new patronage.
     """
-    patronage_df = old_equity_df.set_index('member_#')[['name', 'equity']]
-    patronage_df.rename(columns={'equity': 'old_patronage'}, inplace=True)
+    #Since find_matching_names returns a list, we're assigning to a tuple, so we need a comma
+    #after the variable name to denote a tuple of length 1.
+    old_patronage_col, = find_matching_names('old_patronage', old_patronage_df.columns)
+    new_patronage_col, = find_matching_names('new_patronage', new_patronage_df.columns)
+    patronage_col = 'patronage'
 
-#     new_contributions_df = new_patronage_by_transaction(new_contributions_df)
-#     new_contributions_df[['member_#','patronage']].groupby(by='member_#').sum()
+    #Keep member_# and/or name only if the column is in both patronage dataframes.
+    #This will cause an error if the two patronage dataframes don't share a common column.
+    join_columns = [c for c in old_patronage_df.columns if c in ['member_#','name']]
+    join_columns = [c for c in new_patronage_df.columns if c in join_columns]
 
-    patronage_df['new_patronage'] = new_patronage_by_member(new_contributions_df)['patronage']
-    # If there were members with no contributions this year, set their new patronage to 0 (would be NaN).
+    #Join the members dataframe with the old and new patronage using the join columns.
+    #Use left joins to compute patronage precisely for the members in members_df.
+    #We drop duplicates in new_patronage_df because members with more than one
+    #contribution during the year will show up more than once.
+    patronage_df = (members_df[join_columns]
+                    .merge(old_patronage_df[join_columns + [old_patronage_col]],
+                        on=join_columns, how='left')
+                    .merge(new_patronage_df[join_columns + ['member_total']].drop_duplicates(),
+                        on=join_columns, how='left')
+                   )
+
+    #Rename the 'member_total' column as new_patronage_col.
+    patronage_df.rename(columns={'member_total': new_patronage_col}, inplace=True)
+
+    #If there were members with no patronage, set their patronage to 0.
+    #(otherwise we'd get NaN's)
     patronage_df.fillna(0, inplace=True)
 
-    patronage_df['patronage'] = patronage_df['old_patronage'] + patronage_df['new_patronage']
-    patronage_df['proportionate_patronage'] = patronage_df['patronage'] / patronage_df['patronage'].sum()
+    #Check whether the old and new patronage columns share a comon prepended year.
+    #If so, prepend the year to the patronage column.
+    year = get_year_from_names([old_patronage_col, new_patronage_col])
+    if year is not None:
+        patronage_col = prepend_year(year, patronage_col)
+
+    #Compute the total patronage and proportionate patronage and store them to new columns.
+    patronage_df[patronage_col] = patronage_df[old_patronage_col] + patronage_df[new_patronage_col]
+    patronage_df['proportionate_patronage'] = patronage_df[patronage_col] / patronage_df[patronage_col].sum()
 
     return patronage_df
 
-def compute_patronage_for_year(members_df, contributions_df, year):
-    """Computes each member's patronage for the specified year."""
-    old_equity_df, new_contributions_df = split_by_year(contributions_df, year)[:2]
-    old_equity_df = get_equity_df(members_df, old_equity_df)
-    return compute_patronage(old_equity_df, new_contributions_df)
+# def compute_patronage_for_year(members_df, contributions_df, year):
+#     """Computes each member's patronage for the specified year."""
+#     old_equity_df, new_contributions_df = split_by_year(contributions_df, year)[:2]
+#     old_equity_df = get_equity_df(members_df, old_equity_df)
+#     return compute_patronage(old_equity_df, new_contributions_df)
+
+
 
 def compute_dividends(patronage_df, profit, proportion_individual=0.5, rounded=True):
     """Compute each member's dividend based on patronage for the year.
@@ -162,8 +263,6 @@ def compute_dividends(patronage_df, profit, proportion_individual=0.5, rounded=T
         'proportion_of_profit': 1.0,
         'dividend': profit
     })
-
-
 
     return dividend_df
 

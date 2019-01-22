@@ -61,7 +61,7 @@ def prepend_year(year, col_names):
 
 def get_year_from_names(names):
     """Tests whether a name or list of names share a common 4-digit number (e.g. year) prepended to them.
-    If so, returns the year as in int, otherwise (no year or years don't match) returns None.
+    If so, returns the year as an int, otherwise (no year or years don't match) returns None.
     """
     #If a single name was passed, put it in a list.
     if type(names) is str: names = [names]
@@ -71,6 +71,7 @@ def get_year_from_names(names):
 
     #Check whether the first 4 digits of the names in each pair match.
     #If so, all names share a common prefix.
+    #Note: all([]) evaluates to True, so this still works if len(names) == 1.
     if all(name1[:4] == name2[:4] for name1, name2 in consecutive_pairs):
         #Check if the matching prefix is a digit, and if so return it.
         if names[0][:4].isdigit():
@@ -84,7 +85,8 @@ def is_match(name, col_name):
     plus one character (e.g. year plus a space or underscore).
     """
     return (col_name[-len(name):] == name) and (
-        len(col_name) == len(name) or (col_name[:4].isdigit() and len(col_name) == len(name)+5)
+        len(col_name) == len(name) or
+        (len(col_name) == len(name)+5 and col_name[:4].isdigit())
     )
 
 def find_matching_names(names, columns):
@@ -330,8 +332,10 @@ def compute_allocations(dividend_df,
     #Or if they passed a specific year, adjust the payment for that year.
     if irregular_payment == 'first': irregular_payment = 1
     elif irregular_payment == 'last': irregular_payment = n_years
-    elif 1 <= irregular_payment <= n_years: pass
-    else: raise ValueError(
+    # elif 1 <= irregular_payment <= n_years: pass
+    # else:
+    elif not (1 <= irregular_payment <= n_years):
+        raise ValueError(
         "irregular_payment must be 'first', 'last', or an integer between 1 and n_years (inclusive).")
 
     sum_of_remaining = (allocations[:,:irregular_payment-1].sum(axis=1)
@@ -377,7 +381,8 @@ def unpivot_allocations(allocation_df):
     return pd.concat(allocations_by_year_due_dfs).reset_index()
 
 def unpivot_allocations_with_melt(allocation_df):
-    """Return a dataframe listing the allocations in allocation_df, in "unpivoted" form.
+    """Return a dataframe listing the allocations in allocation_df, in "unpivoted" form,
+    using the pandas melt function.
     In this version, years are stored as strings."""
     years_due = get_years_due(allocation_df)
     year_issued = years_due[0]-1
